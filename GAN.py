@@ -15,6 +15,7 @@ import requests
 from PIL import Image
 from io import BytesIO
 import torch.nn.utils.spectral_norm as spectral_norm
+import random
 
 # annFile = 'http://images.cocodataset.org/annotations/annotations_trainval2017.zip'
 # local_ann_file = "captions_train2017.json"
@@ -59,33 +60,46 @@ class ArtCaptionDataset(Dataset):
 class Generator(nn.Module):
     def __init__(self, text_dim, noise_dim=100, out_channels=3):
         super().__init__()
-        self.fc = nn.Linear(text_dim + noise_dim, 1024 * 4 * 4)
+        self.text_proj = nn.Sequential(
+            nn.Linear(text_dim, 256),
+            nn.ReLU()
+        )
+        self.noise_proj = nn.Sequential(
+            nn.Linear(noise_dim, 256),
+            nn.ReLU()
+        )
+        self.fc = nn.Sequential(
+            nn.Linear(256, 1024 * 4 * 4),
+            nn.BatchNorm1d(1024 * 4 * 4),
+            nn.ReLU()
+        )
+
         self.deconv = nn.Sequential(
-            nn.BatchNorm2d(1024),
-            nn.ReLU(True),
-            nn.ConvTranspose2d(1024, 512, 4, 2, 1),  
+            nn.ConvTranspose2d(1024, 512, 4, 2, 1),
             nn.BatchNorm2d(512),
             nn.ReLU(True),
-            nn.ConvTranspose2d(512, 256, 4, 2, 1),  
+
+            nn.ConvTranspose2d(512, 256, 4, 2, 1),
             nn.BatchNorm2d(256),
             nn.ReLU(True),
-       
-            nn.ConvTranspose2d(256, 128, 4, 2, 1),  # 8x8
+
+            nn.ConvTranspose2d(256, 128, 4, 2, 1),
             nn.BatchNorm2d(128),
             nn.ReLU(True),
-            nn.ConvTranspose2d(128, 64, 4, 2, 1),   # 16x16
+
+            nn.ConvTranspose2d(128, 64, 4, 2, 1),
             nn.BatchNorm2d(64),
             nn.ReLU(True),
-            nn.ConvTranspose2d(64, 32, 4, 2, 1),    # 64x64
-            nn.BatchNorm2d(32),
-            nn.ReLU(True),
 
-            nn.Conv2d(32, out_channels, 3, padding=1),  # Final conv
+            nn.Conv2d(64, out_channels, 3, padding=1),
             nn.Tanh()
         )
 
     def forward(self, noise, text_emb):
-        x = torch.cat((noise, text_emb), dim=1)
+
+        text_feat = self.text_proj(text_emb)
+        noise_feat = self.noise_proj(noise)
+        x = text_feat + noise_feat
         x = self.fc(x).view(-1, 1024, 4, 4)
         return self.deconv(x)
 
@@ -132,25 +146,25 @@ def train(generator, discriminator, dataloader, epochs=10):
     discriminator.to(device)
     
     optim_G = torch.optim.Adam(generator.parameters(), lr=0.0001, betas=(0.5, 0.9))
-    optim_D = torch.optim.Adam(discriminator.parameters(), lr=0.0004, betas=(0.5, 0.9))
+    optim_D = torch.optim.Adam(discriminator.parameters(), lr=0.0006, betas=(0.5, 0.9))
     criterion = nn.BCELoss()
 
     for epoch in range(epochs):
         for i, (real_imgs, txt_emb) in enumerate(dataloader):
             batch_size = real_imgs.size(0)
             real_imgs, txt_emb = real_imgs.to(device), txt_emb.to(device)
-
+            real_imgs = real_imgs + torch.empty_like(real_imgs).uniform_(-0.2, 0.2)
       
-            real_labels = torch.empty(batch_size, 1, device=device).uniform_(0.8, 1.0)  # label smoothing
+            real_labels = torch.ones(batch_size, 1, device=device) * 0.9
             fake_labels = torch.zeros(batch_size, 1, device=device)
 
             noise = torch.randn(batch_size, 100, device=device)
-            real_imgs_noisy = real_imgs + 0.1 * torch.randn_like(real_imgs)
+            real_imgs_noisy = real_imgs + torch.randn_like(real_imgs) * 0.2
             
 
             with torch.no_grad():
                 fake_imgs_detached = generator(noise, txt_emb).detach()
-            fake_imgs_noisy = fake_imgs_detached + 0.1 * torch.randn_like(fake_imgs_detached)
+            fake_imgs_noisy = fake_imgs_detached + torch.randn_like(fake_imgs_detached) * 0.2
 
  
             real_validity = discriminator(real_imgs_noisy, txt_emb)
@@ -167,7 +181,9 @@ def train(generator, discriminator, dataloader, epochs=10):
                 noise = torch.randn(batch_size, 100, device=device)
                 fake_imgs = generator(noise, txt_emb)
                 fake_validity = discriminator(fake_imgs, txt_emb)
-                g_loss = criterion(fake_validity, torch.ones(batch_size, 1, device=device))  # wants to fool D
+                g_loss = criterion(fake_validity, torch.ones(batch_size, 1, device=device))
+                diversity_loss = torch.mean(torch.std(fake_imgs.view(fake_imgs.size(0), -1), dim=0))
+                g_loss += 0.1 * (1.0 - diversity_loss)
 
                 optim_G.zero_grad()
                 g_loss.backward()
@@ -175,8 +191,9 @@ def train(generator, discriminator, dataloader, epochs=10):
 
             if i % 100 == 0:
                 print(f"Epoch {epoch} | Step {i} | D Loss: {d_loss.item():.4f} | G Loss: {g_loss.item():.4f}")
-        sample_images(G, ["a man riding a horse", "a dog in a park", "a red car"], text_encoder)
-def sample_images(generator, text_prompts, text_encoder):
+        sample_images(G, ["a man riding a horse", "a dog in a park", "a red car", "a policeman under a tree", "a woman with a bowl of fruit", "a blue boat" ], text_encoder)
+def sample_images(generator, text_prompts, text_encoder, save_path="samples/sample.png"):
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
     generator.eval()
     device = next(generator.parameters()).device
     noise = torch.randn(len(text_prompts), 100).to(device)
@@ -187,11 +204,9 @@ def sample_images(generator, text_prompts, text_encoder):
     with torch.no_grad():
         imgs = generator(noise, txt_emb).cpu()
 
-    # Denormalize
     inv_norm = transforms.Normalize(mean=[-1, -1, -1], std=[2, 2, 2])
     imgs = inv_norm(imgs)
 
-    # Clamp values between 0 and 1 before grid to avoid out-of-range colors
     imgs = torch.clamp(imgs, 0, 1)
 
     grid = make_grid(imgs, nrow=3)
@@ -199,7 +214,7 @@ def sample_images(generator, text_prompts, text_encoder):
     plt.figure(figsize=(10, 10))
     plt.imshow(np.transpose(grid.numpy(), (1, 2, 0)))
     plt.axis('off')
-    plt.pause(2)
+    plt.savefig(save_path, bbox_inches='tight')
     plt.close()
 image_dir = "images"
 caption_path = "ArtCap.json"
@@ -210,15 +225,82 @@ transform = transforms.Compose([
     transforms.Normalize([0.5]*3, [0.5]*3)
 ])
 
-text_encoder = SentenceTransformer('all-MiniLM-L6-v2')
+from transformers import CLIPProcessor, CLIPModel
+
+class CLIPTextEncoder:
+    def __init__(self):
+        self.model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
+        self.processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model.to(self.device)
+
+    def encode(self, text):
+        inputs = self.processor(text=[text], return_tensors="pt", padding=True, truncation=True).to(self.device)
+        with torch.no_grad():
+            outputs = self.model.get_text_features(**inputs)
+        return outputs.squeeze(0).cpu()
+
+text_encoder = CLIPTextEncoder()
 
 dataset = ArtCaptionDataset(image_dir, caption_path, transform, text_encoder, max_samples=10000)
+for i in range(5):
+    img, txt_emb = dataset[i]
+    plt.imshow(img.permute(1, 2, 0).numpy() * 0.5 + 0.5)
+    # Show the original caption instead
+    caption = dataset.samples[i][1]
+    plt.title(caption)
+    plt.axis('off')
+    plt.pause(2)
+    plt.close()
+    txts = ["a dog", "a cat", "a boat", "a banana", "a policeman"]
+
 
 dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
 
-G = Generator(text_dim=384, noise_dim=100)
-D = Discriminator(text_dim=384)
+G = Generator(text_dim=512, noise_dim=100)
+D = Discriminator(text_dim=512)
 
-train(G, D, dataloader, epochs=100)
+train(G, D, dataloader, epochs=150)
 
-sample_images(G, ["a man riding a horse", "a dog in a park", "a red car"], text_encoder)
+G.eval()
+device = next(G.parameters()).device
+
+# Define test prompts
+prompts = ["a dog", "a cat", "a horse", "a car", "a house"]
+noise = torch.randn(len(prompts), 100).to(device)
+
+# Get different text embeddings
+embeddings_diff = [text_encoder.encode(p) for p in prompts]
+embeddings_diff = torch.tensor(np.stack(embeddings_diff), dtype=torch.float32).to(device)
+
+# Get same text embedding repeated
+same_embedding = text_encoder.encode("a dog")
+embeddings_same = torch.tensor([same_embedding] * len(prompts), dtype=torch.float32).to(device)
+
+# Generate images
+with torch.no_grad():
+    imgs_diff = G(noise, embeddings_diff).cpu()
+    imgs_same = G(noise, embeddings_same).cpu()
+
+# Convert to displayable images
+def denorm(imgs):
+    inv = transforms.Normalize(mean=[-1, -1, -1], std=[2, 2, 2])
+    return torch.clamp(inv(imgs), 0, 1)
+
+imgs_diff = denorm(imgs_diff)
+imgs_same = denorm(imgs_same)
+
+# Plot
+def show_images(imgs, title):
+    grid = make_grid(imgs, nrow=5)
+    plt.figure(figsize=(15, 4))
+    plt.imshow(np.transpose(grid.numpy(), (1, 2, 0)))
+    plt.axis('off')
+    plt.title(title)
+    plt.pause(2)
+    plt.close()
+
+show_images(imgs_diff, "Different Text, Same Noise")
+show_images(imgs_same, "Same Text, Same Noise")
+
+sample_images(G, ["a man riding a horse", "a dog in a park", "a red car", "a policeman under a tree", "a woman with a bowl of fruit", "a blue boat" ], text_encoder, save_path="samples/final.png")
