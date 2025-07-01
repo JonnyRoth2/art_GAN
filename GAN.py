@@ -69,7 +69,7 @@ class Generator(nn.Module):
             nn.ReLU()
         )
         self.fc = nn.Sequential(
-            nn.Linear(256, 2048 * 4 * 4),
+            nn.Linear(512, 2048 * 4 * 4),
             nn.BatchNorm1d(2048 * 4 * 4),
             nn.ReLU()
         )
@@ -108,7 +108,7 @@ class Generator(nn.Module):
 
         text_feat = self.text_proj(text_emb)
         noise_feat = self.noise_proj(noise)
-        x = text_feat + noise_feat
+        x = torch.cat((text_feat, noise_feat), dim=1)
         x = self.fc(x).view(-1, 2048, 4, 4)
         return self.deconv(x)
 
@@ -160,7 +160,7 @@ def train(generator, discriminator, dataloader, epochs=10):
     discriminator.to(device)
     
     optim_G = torch.optim.Adam(generator.parameters(), lr=0.0001, betas=(0.5, 0.9))
-    optim_D = torch.optim.Adam(discriminator.parameters(), lr=0.0001, betas=(0.5, 0.9))
+    optim_D = torch.optim.Adam(discriminator.parameters(), lr=0.00005, betas=(0.5, 0.9))
     criterion = nn.BCELoss()
 
     for epoch in range(epochs):
@@ -191,13 +191,13 @@ def train(generator, discriminator, dataloader, epochs=10):
             d_loss.backward()
             optim_D.step()
 
-            for _ in range(2):
+            for _ in range(3):
                 noise = torch.randn(batch_size, 100, device=device)
                 fake_imgs = generator(noise, txt_emb)
                 fake_validity = discriminator(fake_imgs, txt_emb)
                 g_loss = criterion(fake_validity, torch.ones(batch_size, 1, device=device))
                 diversity_loss = torch.mean(torch.std(fake_imgs.view(fake_imgs.size(0), -1), dim=0))
-                g_loss += 0.1 * (1.0 - diversity_loss)
+                g_loss += 0.5 * (1.0 - diversity_loss)
 
                 optim_G.zero_grad()
                 g_loss.backward()
