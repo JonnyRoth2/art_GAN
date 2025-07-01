@@ -69,12 +69,17 @@ class Generator(nn.Module):
             nn.ReLU()
         )
         self.fc = nn.Sequential(
-            nn.Linear(256, 1024 * 4 * 4),
-            nn.BatchNorm1d(1024 * 4 * 4),
+            nn.Linear(256, 2048 * 4 * 4),
+            nn.BatchNorm1d(2048 * 4 * 4),
             nn.ReLU()
         )
 
         self.deconv = nn.Sequential(
+
+            nn.ConvTranspose2d(2048, 1024, 4, 2, 1),
+            nn.BatchNorm2d(1024),
+            nn.ReLU(True),
+
             nn.ConvTranspose2d(1024, 512, 4, 2, 1),
             nn.BatchNorm2d(512),
             nn.ReLU(True),
@@ -91,7 +96,11 @@ class Generator(nn.Module):
             nn.BatchNorm2d(64),
             nn.ReLU(True),
 
-            nn.Conv2d(64, out_channels, 3, padding=1),
+             nn.ConvTranspose2d(64, 32, 4, 2, 1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(True),
+
+            nn.Conv2d(32, out_channels, 3, padding=1),
             nn.Tanh()
         )
 
@@ -100,31 +109,36 @@ class Generator(nn.Module):
         text_feat = self.text_proj(text_emb)
         noise_feat = self.noise_proj(noise)
         x = text_feat + noise_feat
-        x = self.fc(x).view(-1, 1024, 4, 4)
+        x = self.fc(x).view(-1, 2048, 4, 4)
         return self.deconv(x)
 
 class Discriminator(nn.Module):
     def __init__(self, text_dim):
         super().__init__()
         self.image_net = nn.Sequential(
-            spectral_norm(nn.Conv2d(3, 32, 4, 2, 1)),  
+            nn.Conv2d(3, 32, 4, 2, 1),  
             nn.LeakyReLU(0.3), 
             nn.Dropout2d(0.25),    
 
-            spectral_norm(nn.Conv2d(32,64 , 4, 2, 1)),
+            nn.Conv2d(32,64 , 4, 2, 1),
             nn.BatchNorm2d(64),
             nn.LeakyReLU(0.3),
-            nn.Dropout2d(0.25),
+            nn.Dropout2d(0.3),
 
-            spectral_norm(nn.Conv2d(64, 128, 4, 2, 1)),
+            nn.Conv2d(64, 128, 4, 2, 1),
             nn.BatchNorm2d(128),
             nn.LeakyReLU(0.3),
             nn.Dropout2d(0.25),
 
-            spectral_norm(nn.Conv2d(128,256 , 4, 2, 1)),
+            nn.Conv2d(128,256 , 4, 2, 1),
             nn.BatchNorm2d(256),
             nn.LeakyReLU(0.3),
-            nn.Dropout2d(0.25),
+            nn.Dropout2d(0.3),
+
+            # nn.Conv2d(256,512 , 4, 2, 1),
+            # nn.BatchNorm2d(512),
+            # nn.LeakyReLU(0.3),
+            # nn.Dropout2d(0.25),
         )
         self.text_fc = nn.Linear(text_dim, 256 * 8 * 8)  
         self.final = nn.Sequential(
@@ -146,7 +160,7 @@ def train(generator, discriminator, dataloader, epochs=10):
     discriminator.to(device)
     
     optim_G = torch.optim.Adam(generator.parameters(), lr=0.0001, betas=(0.5, 0.9))
-    optim_D = torch.optim.Adam(discriminator.parameters(), lr=0.0006, betas=(0.5, 0.9))
+    optim_D = torch.optim.Adam(discriminator.parameters(), lr=0.0001, betas=(0.5, 0.9))
     criterion = nn.BCELoss()
 
     for epoch in range(epochs):
@@ -243,24 +257,15 @@ class CLIPTextEncoder:
 text_encoder = CLIPTextEncoder()
 
 dataset = ArtCaptionDataset(image_dir, caption_path, transform, text_encoder, max_samples=10000)
-for i in range(5):
-    img, txt_emb = dataset[i]
-    plt.imshow(img.permute(1, 2, 0).numpy() * 0.5 + 0.5)
-    # Show the original caption instead
-    caption = dataset.samples[i][1]
-    plt.title(caption)
-    plt.axis('off')
-    plt.pause(2)
-    plt.close()
-    txts = ["a dog", "a cat", "a boat", "a banana", "a policeman"]
 
 
-dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
+
+dataloader = DataLoader(dataset, batch_size=20, shuffle=True)
 
 G = Generator(text_dim=512, noise_dim=100)
 D = Discriminator(text_dim=512)
 
-train(G, D, dataloader, epochs=150)
+train(G, D, dataloader, epochs=250)
 
 G.eval()
 device = next(G.parameters()).device
