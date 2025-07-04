@@ -35,31 +35,34 @@ class Generator(nn.Module):
         super().__init__()
         self.text_proj = nn.Sequential(
             nn.Linear(text_dim, 256),
-            nn.ReLU()
+            nn.LeakyReLU(0.2),
         )
         self.noise_proj = nn.Sequential(
             nn.Linear(noise_dim, 256),
-            nn.ReLU()
+            nn.LeakyReLU(0.2),
         )
         self.fc = nn.Sequential(
-            nn.Linear(512, 1024 * 4 * 4),
-            nn.BatchNorm1d(1024 * 4 * 4),
-            nn.ReLU()
+               nn.Linear(512, 2048 * 4 * 4),
+                nn.BatchNorm1d(2048 * 4 * 4),
+                nn.LeakyReLU(0.2),
         )
         self.deconv = nn.Sequential(
+            nn.ConvTranspose2d(2048, 1024, 4, 2, 1),
+            nn.BatchNorm2d(1024),
+            nn.LeakyReLU(0.2),
             nn.ConvTranspose2d(1024, 512, 4, 2, 1),
             nn.BatchNorm2d(512),
-            nn.ReLU(True),
+            nn.LeakyReLU(0.2),
             nn.ConvTranspose2d(512, 256, 4, 2, 1),
             nn.BatchNorm2d(256),
-            nn.ReLU(True),
+            nn.LeakyReLU(0.2),
             nn.ConvTranspose2d(256, 128, 4, 2, 1),
             nn.BatchNorm2d(128),
-            nn.ReLU(True),
-            nn.ConvTranspose2d(128, 64, 4, 2, 1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(True),
-            nn.Conv2d(64, out_channels, 3, padding=1),
+            nn.LeakyReLU(0.2),
+            # nn.ConvTranspose2d(128, 64, 4, 2, 1),
+            # nn.BatchNorm2d(64),
+            # nn.ReLU(True),
+            nn.Conv2d(128, out_channels, 3, padding=1),
             nn.Tanh()
         )
 
@@ -67,7 +70,7 @@ class Generator(nn.Module):
         text_feat = self.text_proj(label_emb)
         noise_feat = self.noise_proj(noise)
         x = torch.cat((text_feat, noise_feat), dim=1)
-        x = self.fc(x).view(-1, 1024, 4, 4)
+        x = self.fc(x).view(-1, 2048, 4, 4)
         return self.deconv(x)
 
 class Discriminator(nn.Module):
@@ -89,17 +92,17 @@ class Discriminator(nn.Module):
             nn.BatchNorm2d(1024),
             nn.LeakyReLU(0.2)
         )
-        self.text_fc = spectral_norm(nn.Linear(text_dim, 1024 * 2 * 2))
+        self.text_fc = spectral_norm(nn.Linear(text_dim, 1024 * 2* 2))
         self.final = nn.Sequential(
             nn.Conv2d(2048, 1, 1),
             nn.AdaptiveAvgPool2d(1),
-            nn.Sigmoid()
+            
         )
 
     def forward(self, img, label_emb):
         img_feat = self.image_net(img)
-        label_feat = self.text_fc(label_emb).view(-1, 1024, 2, 2)
-        x = torch.cat((img_feat, label_feat), dim=1)
+        label_feat = self.text_fc(label_emb).view(-1, 1024, 2, 2)  
+        x = torch.cat((img_feat, label_feat), dim=1)  
         return self.final(x).view(-1, 1)
 
 def sample_images(generator, labels, save_path):
@@ -138,38 +141,55 @@ def train(generator, discriminator, dataloader, epochs=100):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     generator.to(device)
     discriminator.to(device)
+
     optim_G = torch.optim.Adam(generator.parameters(), lr=0.0001, betas=(0.5, 0.9))
     optim_D = torch.optim.Adam(discriminator.parameters(), lr=0.00003, betas=(0.5, 0.9))
-    criterion = nn.BCELoss()
+    criterion = nn.BCEWithLogitsLoss()
 
     for epoch in range(epochs):
         for i, (real_imgs, labels) in enumerate(dataloader):
             batch_size = real_imgs.size(0)
-            real_imgs, labels = real_imgs.to(device), labels.to(device)
-            real_labels = torch.empty(batch_size, 1, device=device).uniform_(0.8, 1.0)
-            fake_labels = torch.empty(batch_size, 1, device=device).uniform_(0.0, 0.2)
+            real_imgs = real_imgs.to(device)
+            labels = labels.to(device)
 
+            real_labels = torch.rand(batch_size, 1, device=device) * 0.2 + 0.8 
+            fake_labels = torch.rand(batch_size, 1, device=device) * 0.2        
+
+          
             noise = torch.randn(batch_size, 100, device=device)
             with torch.no_grad():
                 fake_imgs = generator(noise, labels)
-            d_loss = criterion(discriminator(real_imgs, labels), real_labels)
-            d_loss += criterion(discriminator(fake_imgs, labels), fake_labels)
-            optim_D.zero_grad(); d_loss.backward(); optim_D.step()
 
-            for _ in range(2):
+            real_imgs_noisy = real_imgs + 0.05 * torch.randn_like(real_imgs)
+            fake_imgs_noisy = fake_imgs + 0.05 * torch.randn_like(fake_imgs)
+
+        
+            real_logits = discriminator(real_imgs_noisy, labels)
+            fake_logits = discriminator(fake_imgs_noisy, labels)
+            d_loss = criterion(real_logits, real_labels) + criterion(fake_logits, fake_labels)
+
+            optim_D.zero_grad()
+            d_loss.backward()
+            optim_D.step()
+
+            for _ in range(3):
                 noise = torch.randn(batch_size, 100, device=device)
                 fake_imgs = generator(noise, labels)
-                g_loss = criterion(discriminator(fake_imgs, labels), real_labels)
-                optim_G.zero_grad(); g_loss.backward(); optim_G.step()
+                fake_logits = discriminator(fake_imgs, labels)
+                g_loss = criterion(fake_logits, real_labels)  
+
+                optim_G.zero_grad()
+                g_loss.backward()
+                optim_G.step()
 
             if i % 100 == 0:
                 print(f"Epoch {epoch} Step {i} | D Loss: {d_loss.item():.4f} | G Loss: {g_loss.item():.4f}")
 
+
         if epoch % 10 == 0:
             torch.save(generator.state_dict(), f"checkpoints/generator_epoch_{epoch:03d}.pth")
             torch.save(discriminator.state_dict(), f"checkpoints/discriminator_epoch_{epoch:03d}.pth")
-            sample_images(generator, torch.eye(10), f"samples/sample_epoch_{epoch:03d}.png")
-
+            sample_images(generator, torch.eye(10).to(device), f"samples/sample_epoch_{epoch:03d}.png")
 # ---------------- Run ----------------
 dataset = CIFAR10LabelDataset(train=True)
 dataloader = DataLoader(dataset, batch_size=64, shuffle=True)
