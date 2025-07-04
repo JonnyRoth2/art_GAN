@@ -84,18 +84,21 @@ class Discriminator(nn.Module):
             nn.LeakyReLU(0.2),
             spectral_norm(nn.Conv2d(256, 512, 4, 2, 1)),
             nn.BatchNorm2d(512),
+            nn.LeakyReLU(0.2),
+            spectral_norm(nn.Conv2d(512, 1024, 4, 2, 1)),
+            nn.BatchNorm2d(1024),
             nn.LeakyReLU(0.2)
         )
-        self.text_fc = spectral_norm(nn.Linear(text_dim, 512 * 4 * 4))
+        self.text_fc = spectral_norm(nn.Linear(text_dim, 1024 * 2 * 2))
         self.final = nn.Sequential(
-            nn.Conv2d(1024, 1, 1),
+            nn.Conv2d(2048, 1, 1),
             nn.AdaptiveAvgPool2d(1),
             nn.Sigmoid()
         )
 
     def forward(self, img, label_emb):
         img_feat = self.image_net(img)
-        label_feat = self.text_fc(label_emb).view(-1, 512, 4, 4)
+        label_feat = self.text_fc(label_emb).view(-1, 1024, 2, 2)
         x = torch.cat((img_feat, label_feat), dim=1)
         return self.final(x).view(-1, 1)
 
@@ -109,9 +112,8 @@ def sample_images(generator, labels, save_path):
     with torch.no_grad():
         imgs = generator(noise, labels).cpu()
 
-    imgs = (imgs + 1) / 2  # Denormalize to [0, 1]
-    
-    # Plot each image with a caption
+    imgs = (imgs + 1) / 2
+  
     num_imgs = len(labels)
     nrow = 3
     ncol = int(np.ceil(num_imgs / nrow))
@@ -126,7 +128,7 @@ def sample_images(generator, labels, save_path):
         axs[i].axis('off')
 
     for j in range(num_imgs, len(axs)):
-        axs[j].axis('off')  # Hide unused subplots
+        axs[j].axis('off') 
 
     plt.tight_layout()
     plt.savefig(save_path)
@@ -144,8 +146,8 @@ def train(generator, discriminator, dataloader, epochs=100):
         for i, (real_imgs, labels) in enumerate(dataloader):
             batch_size = real_imgs.size(0)
             real_imgs, labels = real_imgs.to(device), labels.to(device)
-            real_labels = torch.ones(batch_size, 1, device=device) * 0.95
-            fake_labels = torch.zeros(batch_size, 1, device=device)
+            real_labels = torch.empty(batch_size, 1, device=device).uniform_(0.8, 1.0)
+            fake_labels = torch.empty(batch_size, 1, device=device).uniform_(0.0, 0.2)
 
             noise = torch.randn(batch_size, 100, device=device)
             with torch.no_grad():
@@ -153,11 +155,12 @@ def train(generator, discriminator, dataloader, epochs=100):
             d_loss = criterion(discriminator(real_imgs, labels), real_labels)
             d_loss += criterion(discriminator(fake_imgs, labels), fake_labels)
             optim_D.zero_grad(); d_loss.backward(); optim_D.step()
-        for _ in range(2):
-            noise = torch.randn(batch_size, 100, device=device)
-            fake_imgs = generator(noise, labels)
-            g_loss = criterion(discriminator(fake_imgs, labels), real_labels)
-            optim_G.zero_grad(); g_loss.backward(); optim_G.step()
+
+            for _ in range(2):
+                noise = torch.randn(batch_size, 100, device=device)
+                fake_imgs = generator(noise, labels)
+                g_loss = criterion(discriminator(fake_imgs, labels), real_labels)
+                optim_G.zero_grad(); g_loss.backward(); optim_G.step()
 
             if i % 100 == 0:
                 print(f"Epoch {epoch} Step {i} | D Loss: {d_loss.item():.4f} | G Loss: {g_loss.item():.4f}")
@@ -165,12 +168,11 @@ def train(generator, discriminator, dataloader, epochs=100):
         if epoch % 10 == 0:
             torch.save(generator.state_dict(), f"checkpoints/generator_epoch_{epoch:03d}.pth")
             torch.save(discriminator.state_dict(), f"checkpoints/discriminator_epoch_{epoch:03d}.pth")
-            one_hot_labels = torch.eye(10)[:9]
-            sample_images(generator, one_hot_labels, f"samples/epoch_{epoch:03d}.png")
+            sample_images(generator, torch.eye(10), f"samples/sample_epoch_{epoch:03d}.png")
 
 # ---------------- Run ----------------
 dataset = CIFAR10LabelDataset(train=True)
 dataloader = DataLoader(dataset, batch_size=64, shuffle=True)
 G = Generator(text_dim=10)
 D = Discriminator(text_dim=10)
-train(G, D, dataloader, epochs=200)
+train(G, D, dataloader, epochs=201)
