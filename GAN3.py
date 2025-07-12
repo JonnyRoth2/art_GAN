@@ -79,12 +79,15 @@ class Discriminator(nn.Module):
         self.image_net = nn.Sequential(
             spectral_norm(nn.Conv2d(3, 64, 4, 2, 1)),
             nn.LeakyReLU(0.2),
+            nn.Dropout(0.3),
             spectral_norm(nn.Conv2d(64, 128, 4, 2, 1)),
             nn.BatchNorm2d(128),
             nn.LeakyReLU(0.2),
+            nn.Dropout(0.3),
             spectral_norm(nn.Conv2d(128, 256, 4, 2, 1)),
             nn.BatchNorm2d(256),
             nn.LeakyReLU(0.2),
+            nn.Dropout(0.3),
             spectral_norm(nn.Conv2d(256, 512, 4, 2, 1)),
             nn.BatchNorm2d(512),
             nn.LeakyReLU(0.2),
@@ -92,19 +95,24 @@ class Discriminator(nn.Module):
             nn.BatchNorm2d(1024),
             nn.LeakyReLU(0.2)
         )
-        self.text_fc = spectral_norm(nn.Linear(text_dim, 1024 * 2* 2))
+
+        self.label_proj = nn.Sequential(
+            nn.Linear(text_dim, 256),
+            nn.LeakyReLU(0.2),
+            nn.Linear(256, 1024 * 2 * 2),
+            nn.LeakyReLU(0.2),
+        )
+
         self.final = nn.Sequential(
             nn.Conv2d(2048, 1, 1),
             nn.AdaptiveAvgPool2d(1),
-            
         )
 
     def forward(self, img, label_emb):
         img_feat = self.image_net(img)
-        label_feat = self.text_fc(label_emb).view(-1, 1024, 2, 2)  
-        x = torch.cat((img_feat, label_feat), dim=1)  
+        label_feat = self.label_proj(label_emb).view(-1, 1024, 2, 2)
+        x = torch.cat((img_feat, label_feat), dim=1)
         return self.final(x).view(-1, 1)
-
 def sample_images(generator, labels, save_path):
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     generator.eval()
@@ -144,7 +152,6 @@ def train(generator, discriminator, dataloader, epochs=100):
 
     optim_G = torch.optim.Adam(generator.parameters(), lr=0.0001, betas=(0.5, 0.9))
     optim_D = torch.optim.Adam(discriminator.parameters(), lr=0.00003, betas=(0.5, 0.9))
-    criterion = nn.BCEWithLogitsLoss()
 
     for epoch in range(epochs):
         for i, (real_imgs, labels) in enumerate(dataloader):
@@ -152,31 +159,34 @@ def train(generator, discriminator, dataloader, epochs=100):
             real_imgs = real_imgs.to(device)
             labels = labels.to(device)
 
-            real_labels = torch.rand(batch_size, 1, device=device) * 0.2 + 0.8 
-            fake_labels = torch.rand(batch_size, 1, device=device) * 0.2        
-
-          
+            # Generate fake images
             noise = torch.randn(batch_size, 100, device=device)
             with torch.no_grad():
                 fake_imgs = generator(noise, labels)
 
+            # Optional noise injection
             real_imgs_noisy = real_imgs + 0.05 * torch.randn_like(real_imgs)
             fake_imgs_noisy = fake_imgs + 0.05 * torch.randn_like(fake_imgs)
 
-        
+            # Discriminator forward
             real_logits = discriminator(real_imgs_noisy, labels)
             fake_logits = discriminator(fake_imgs_noisy, labels)
-            d_loss = criterion(real_logits, real_labels) + criterion(fake_logits, fake_labels)
+
+            # Hinge loss for Discriminator
+            d_loss = torch.mean(F.relu(1.0 - real_logits)) + torch.mean(F.relu(1.0 + fake_logits))
 
             optim_D.zero_grad()
             d_loss.backward()
             optim_D.step()
 
+            # Generator update (3x)
             for _ in range(3):
                 noise = torch.randn(batch_size, 100, device=device)
                 fake_imgs = generator(noise, labels)
                 fake_logits = discriminator(fake_imgs, labels)
-                g_loss = criterion(fake_logits, real_labels)  
+
+                # Hinge loss for Generator
+                g_loss = -torch.mean(fake_logits)
 
                 optim_G.zero_grad()
                 g_loss.backward()
@@ -185,11 +195,10 @@ def train(generator, discriminator, dataloader, epochs=100):
             if i % 100 == 0:
                 print(f"Epoch {epoch} Step {i} | D Loss: {d_loss.item():.4f} | G Loss: {g_loss.item():.4f}")
 
-
         if epoch % 10 == 0:
             torch.save(generator.state_dict(), f"checkpoints/generator_epoch_{epoch:03d}.pth")
             torch.save(discriminator.state_dict(), f"checkpoints/discriminator_epoch_{epoch:03d}.pth")
-            sample_images(generator, torch.eye(10).to(device), f"samples/sample_epoch_{epoch:03d}.png")
+            sample_images(generator, torch.eye(10, device=device), f"samples/sample_epoch_{epoch:03d}.png")
 # ---------------- Run ----------------
 dataset = CIFAR10LabelDataset(train=True)
 dataloader = DataLoader(dataset, batch_size=64, shuffle=True)
