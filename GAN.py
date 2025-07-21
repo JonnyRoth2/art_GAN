@@ -5,6 +5,7 @@ import torch.nn as nn
 import torchvision.transforms as transforms
 from torchvision.utils import make_grid
 from torch.utils.data import Dataset, DataLoader
+from transformers import CLIPProcessor, CLIPModel
 from PIL import Image
 from sentence_transformers import SentenceTransformer
 import json
@@ -69,16 +70,16 @@ class Generator(nn.Module):
             nn.ReLU()
         )
         self.fc = nn.Sequential(
-            nn.Linear(512, 2048 * 4 * 4),
-            nn.BatchNorm1d(2048 * 4 * 4),
+            nn.Linear(512, 1024 * 4 * 4),
+            nn.BatchNorm1d(1024 * 4 * 4),
             nn.ReLU()
         )
 
         self.deconv = nn.Sequential(
 
-            nn.ConvTranspose2d(2048, 1024, 4, 2, 1),
-            nn.BatchNorm2d(1024),
-            nn.ReLU(True),
+            # nn.ConvTranspose2d(2048, 1024, 4, 2, 1),
+            # nn.BatchNorm2d(1024),
+            # nn.ReLU(True),
 
             nn.ConvTranspose2d(1024, 512, 4, 2, 1),
             nn.BatchNorm2d(512),
@@ -109,7 +110,7 @@ class Generator(nn.Module):
         text_feat = self.text_proj(text_emb)
         noise_feat = self.noise_proj(noise)
         x = torch.cat((text_feat, noise_feat), dim=1)
-        x = self.fc(x).view(-1, 2048, 4, 4)
+        x = self.fc(x).view(-1, 1024, 4, 4)
         return self.deconv(x)
 
 class Discriminator(nn.Module):
@@ -175,12 +176,10 @@ def train(generator, discriminator, dataloader, epochs=10):
             noise = torch.randn(batch_size, 100, device=device)
             real_imgs_noisy = real_imgs + torch.randn_like(real_imgs) * 0.2
             
-
             with torch.no_grad():
                 fake_imgs_detached = generator(noise, txt_emb).detach()
             fake_imgs_noisy = fake_imgs_detached + torch.randn_like(fake_imgs_detached) * 0.2
 
- 
             real_validity = discriminator(real_imgs_noisy, txt_emb)
             fake_validity = discriminator(fake_imgs_noisy, txt_emb)
             d_loss_real = criterion(real_validity, real_labels)
@@ -205,8 +204,25 @@ def train(generator, discriminator, dataloader, epochs=10):
 
             if i % 100 == 0:
                 print(f"Epoch {epoch} | Step {i} | D Loss: {d_loss.item():.4f} | G Loss: {g_loss.item():.4f}")
-        sample_images(G, ["a man riding a horse", "a dog in a park", "a red car", "a policeman under a tree", "a woman with a bowl of fruit", "a blue boat" ], text_encoder)
-def sample_images(generator, text_prompts, text_encoder, save_path="samples/sample.png"):
+
+        if epoch % 10 == 0:
+            sample_images(
+                generator,
+                [
+                    "a man riding a horse",
+                    "a dog in a park",
+                    "a red car",
+                    "a policeman under a tree",
+                    "a woman with a bowl of fruit",
+                    "a blue boat",
+                    "a cow eating grass",
+                    "a man being killed",
+                    "death"
+                ],
+                text_encoder,
+                save_path=f"samples/sample_epoch_{epoch:03d}.png"
+            )
+def sample_images(generator, text_prompts, text_encoder, save_path):
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     generator.eval()
     device = next(generator.parameters()).device
@@ -260,7 +276,7 @@ dataset = ArtCaptionDataset(image_dir, caption_path, transform, text_encoder, ma
 
 
 
-dataloader = DataLoader(dataset, batch_size=20, shuffle=True)
+dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
 
 G = Generator(text_dim=512, noise_dim=100)
 D = Discriminator(text_dim=512)
@@ -308,4 +324,4 @@ def show_images(imgs, title):
 show_images(imgs_diff, "Different Text, Same Noise")
 show_images(imgs_same, "Same Text, Same Noise")
 
-sample_images(G, ["a man riding a horse", "a dog in a park", "a red car", "a policeman under a tree", "a woman with a bowl of fruit", "a blue boat" ], text_encoder, save_path="samples/final.png")
+sample_images(G, ["a man riding a horse", "a dog in a park", "a red car", "a policeman under a tree", "a woman with a bowl of fruit", "a blue boat", "a cow eating grass", "a man being killed", "death" ], text_encoder, save_path="samples/final.png")
